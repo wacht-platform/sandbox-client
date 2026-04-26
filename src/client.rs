@@ -6,15 +6,14 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
-use crate::EXEC_OUTPUTS_BUCKET;
 use crate::handle::SandboxHandle;
-use crate::placement::{PlacementError, PlacementInputs, PlacedNode};
+use crate::placement::{self, PlacementError, PlacementInputs, PlacedNode};
 use crate::protocol::{
     CancelExecRequest, CancelExecResponse, CreateSandboxResponse, CreateTaskSandboxRequest,
     CreateThreadSandboxRequest, DeleteSandboxRequest, DeleteSandboxResponse, ExecSandboxRequest,
-    ExecSandboxResponse, SandboxResponse,
+    ExecSandboxResponse, SandboxResponse, SessionRecord,
 };
-use crate::{affinity, placement, subjects};
+use crate::{EXEC_OUTPUTS_BUCKET, SESSIONS_BUCKET, affinity, subjects};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -52,11 +51,71 @@ impl SandboxNatsClient {
         self
     }
 
-    pub fn jetstream(&self) -> &jetstream::Context {
-        &self.jetstream
+    pub async fn thread(
+        &self,
+        request: &CreateThreadSandboxRequest,
+    ) -> Result<SandboxHandle, SandboxNatsClientError> {
+        let sandbox_id = format!("thread-{}-{}", request.deployment_id, request.thread_id);
+        if let Some(handle) = self.try_attach(&sandbox_id).await? {
+            return Ok(handle);
+        }
+        let affinity_key = affinity::thread_key(&request.deployment_id, &request.thread_id);
+        let placed = self
+            .place(&request.deployment_id, Some(&affinity_key))
+            .await?;
+        let response = self.create_thread(&placed.node_id, request).await?;
+        Ok(self.handle(placed.node_id, response.sandbox_id))
     }
 
-    pub async fn place(
+    pub async fn task(
+        &self,
+        request: &CreateTaskSandboxRequest,
+    ) -> Result<SandboxHandle, SandboxNatsClientError> {
+        let sandbox_id = format!(
+            "task-{}-{}-{}",
+            request.deployment_id, request.project_id, request.task_key
+        );
+        if let Some(handle) = self.try_attach(&sandbox_id).await? {
+            return Ok(handle);
+        }
+        let affinity_key = affinity::task_key(
+            &request.deployment_id,
+            &request.project_id,
+            &request.task_key,
+        );
+        let placed = self
+            .place(&request.deployment_id, Some(&affinity_key))
+            .await?;
+        let response = self.create_task(&placed.node_id, request).await?;
+        Ok(self.handle(placed.node_id, response.sandbox_id))
+    }
+
+    async fn try_attach(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Option<SandboxHandle>, SandboxNatsClientError> {
+        let store = self
+            .jetstream
+            .get_key_value(SESSIONS_BUCKET)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
+        let Some(entry) = store
+            .get(sandbox_id)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let session: SessionRecord = serde_json::from_slice(&entry)
+            .map_err(|err| SandboxNatsClientError::Decode(format!("decode session: {err}")))?;
+        Ok(Some(self.handle(session.node_id, session.sandbox_id)))
+    }
+
+    pub(crate) fn handle(&self, node_id: String, sandbox_id: String) -> SandboxHandle {
+        SandboxHandle::new(self.clone(), node_id, sandbox_id)
+    }
+
+    pub(crate) async fn place(
         &self,
         deployment_id: &str,
         affinity_key: Option<&str>,
@@ -71,15 +130,16 @@ impl SandboxNatsClient {
         .await?)
     }
 
-    pub async fn create_thread(
+    pub(crate) async fn create_thread(
         &self,
         node_id: &str,
         request: &CreateThreadSandboxRequest,
     ) -> Result<CreateSandboxResponse, SandboxNatsClientError> {
-        self.request(&subjects::thread_create(node_id), request).await
+        self.request(&subjects::thread_create(node_id), request)
+            .await
     }
 
-    pub async fn create_task(
+    pub(crate) async fn create_task(
         &self,
         node_id: &str,
         request: &CreateTaskSandboxRequest,
@@ -87,39 +147,7 @@ impl SandboxNatsClient {
         self.request(&subjects::task_create(node_id), request).await
     }
 
-    pub fn handle(&self, node_id: String, sandbox_id: String) -> SandboxHandle {
-        SandboxHandle::new(self.clone(), node_id, sandbox_id)
-    }
-
-    pub async fn ensure_thread(
-        &self,
-        request: &CreateThreadSandboxRequest,
-    ) -> Result<SandboxHandle, SandboxNatsClientError> {
-        let affinity_key = affinity::thread_key(&request.deployment_id, &request.thread_id);
-        let placed = self
-            .place(&request.deployment_id, Some(&affinity_key))
-            .await?;
-        let response = self.create_thread(&placed.node_id, request).await?;
-        Ok(self.handle(placed.node_id, response.sandbox_id))
-    }
-
-    pub async fn ensure_task(
-        &self,
-        request: &CreateTaskSandboxRequest,
-    ) -> Result<SandboxHandle, SandboxNatsClientError> {
-        let affinity_key = affinity::task_key(
-            &request.deployment_id,
-            &request.project_id,
-            &request.task_key,
-        );
-        let placed = self
-            .place(&request.deployment_id, Some(&affinity_key))
-            .await?;
-        let response = self.create_task(&placed.node_id, request).await?;
-        Ok(self.handle(placed.node_id, response.sandbox_id))
-    }
-
-    pub async fn exec(
+    pub(crate) async fn exec(
         &self,
         node_id: &str,
         request: &ExecSandboxRequest,
@@ -129,7 +157,7 @@ impl SandboxNatsClient {
             .await
     }
 
-    pub async fn cancel_exec(
+    pub(crate) async fn cancel_exec(
         &self,
         node_id: &str,
         request: &CancelExecRequest,
@@ -137,7 +165,7 @@ impl SandboxNatsClient {
         self.request(&subjects::exec_cancel(node_id), request).await
     }
 
-    pub async fn delete(
+    pub(crate) async fn delete(
         &self,
         node_id: &str,
         request: &DeleteSandboxRequest,
@@ -145,9 +173,7 @@ impl SandboxNatsClient {
         self.request(&subjects::delete(node_id), request).await
     }
 
-    /// Read full exec output (stdout or stderr) by walking chunks in `sandbox_exec_outputs`.
-    /// Returns `None` if the bucket has no entries for the given prefix (e.g. expired by TTL).
-    pub async fn read_exec_stream(
+    pub(crate) async fn read_exec_stream(
         &self,
         prefix: &str,
         stream: &str,
@@ -230,4 +256,3 @@ async fn read_chunk(store: &Store, key: &str) -> Result<Vec<u8>, SandboxNatsClie
             SandboxNatsClientError::Nats(format!("missing exec output chunk {key} (expired?)"))
         })
 }
-

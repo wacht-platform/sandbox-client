@@ -13,7 +13,7 @@ pub struct SandboxHandle {
 }
 
 impl SandboxHandle {
-    pub fn new(client: SandboxNatsClient, node_id: String, sandbox_id: String) -> Self {
+    pub(crate) fn new(client: SandboxNatsClient, node_id: String, sandbox_id: String) -> Self {
         Self {
             client,
             node_id,

@@ -9,8 +9,6 @@ pub struct CreateThreadSandboxRequest {
     pub project_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -18,8 +16,6 @@ pub struct CreateTaskSandboxRequest {
     pub deployment_id: String,
     pub project_id: String,
     pub task_key: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub image: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

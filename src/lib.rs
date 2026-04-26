@@ -1,13 +1,13 @@
 pub mod affinity;
 pub mod client;
 pub mod handle;
-pub mod placement;
 pub mod protocol;
-pub mod subjects;
+
+pub(crate) mod placement;
+pub(crate) mod subjects;
 
 pub use client::{SandboxNatsClient, SandboxNatsClientError};
 pub use handle::SandboxHandle;
-pub use placement::{PlacementError, PlacementTier, PlacedNode, pick_node_for_deployment};
 pub use protocol::{
     AffinityRecord, CancelExecRequest, CancelExecResponse, CreateSandboxResponse,
     CreateTaskSandboxRequest, CreateThreadSandboxRequest, DeleteSandboxRequest,

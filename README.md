@@ -49,12 +49,11 @@ let nats = async_nats::connect("nats://127.0.0.1:4222").await?;
 let client = SandboxNatsClient::new(nats);
 
 let handle = client
-    .ensure_thread(&CreateThreadSandboxRequest {
+    .thread(&CreateThreadSandboxRequest {
         deployment_id: "123".into(),
         thread_id: "456".into(),
         project_id: Some("789".into()),
         agent_id: Some("321".into()),
-        image: None,
     })
     .await?;
 
