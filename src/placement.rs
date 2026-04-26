@@ -11,18 +11,9 @@ use crate::{AFFINITY_BUCKET, DEPLOYMENT_MOUNTS_BUCKET, NODES_BUCKET};
 
 const NODE_ALIVE_MAX_AGE: Duration = Duration::from_secs(15);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PlacementTier {
-    Affinity,
-    HotMount,
-    WarmMount,
-    LeastLoaded,
-}
-
 #[derive(Debug, Clone)]
 pub struct PlacedNode {
     pub node_id: String,
-    pub tier: PlacementTier,
 }
 
 #[derive(Debug, Error)]
@@ -59,7 +50,6 @@ pub async fn pick_node_for_deployment(
                 if mount.is_none_or(|m| m.mounted) {
                     return Ok(PlacedNode {
                         node_id: record.node_id,
-                        tier: PlacementTier::Affinity,
                     });
                 }
             }
@@ -69,43 +59,25 @@ pub async fn pick_node_for_deployment(
     let deployment_mounts = list_deployment_mounts(&mounts_store, inputs.deployment_id).await?;
     let live_node_ids: Vec<&str> = live_nodes.iter().map(|n| n.node_id.as_str()).collect();
 
-    if let Some(node) = pick_by_mount_status(
-        &deployment_mounts,
-        &live_nodes,
-        &live_node_ids,
-        "hot",
-    ) {
-        return Ok(PlacedNode {
-            node_id: node,
-            tier: PlacementTier::HotMount,
-        });
+    if let Some(node) =
+        pick_by_mount_status(&deployment_mounts, &live_nodes, &live_node_ids, "hot")
+    {
+        return Ok(PlacedNode { node_id: node });
     }
 
-    if let Some(node) = pick_by_mount_status(
-        &deployment_mounts,
-        &live_nodes,
-        &live_node_ids,
-        "warm",
-    ) {
-        return Ok(PlacedNode {
-            node_id: node,
-            tier: PlacementTier::WarmMount,
-        });
+    if let Some(node) =
+        pick_by_mount_status(&deployment_mounts, &live_nodes, &live_node_ids, "warm")
+    {
+        return Ok(PlacedNode { node_id: node });
     }
 
     let least_loaded = live_nodes
         .into_iter()
-        .min_by_key(|node| {
-            (
-                node.capacity.current_execs,
-                node.capacity.current_sessions,
-            )
-        })
+        .min_by_key(|node| (node.capacity.current_execs, node.capacity.current_sessions))
         .ok_or(PlacementError::NoNodes)?;
 
     Ok(PlacedNode {
         node_id: least_loaded.node_id,
-        tier: PlacementTier::LeastLoaded,
     })
 }
 
