@@ -7,13 +7,17 @@ use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::handle::SandboxHandle;
-use crate::placement::{self, PlacementError, PlacementInputs, PlacedNode};
+use crate::placement::{self, NODE_ALIVE_MAX_AGE, PlacementError, PlacementInputs, PlacedNode};
 use crate::protocol::{
     CancelExecRequest, CancelExecResponse, CreateSandboxResponse, CreateTaskSandboxRequest,
-    CreateThreadSandboxRequest, DeleteSandboxRequest, DeleteSandboxResponse, ExecSandboxRequest,
-    ExecSandboxResponse, SandboxResponse, SessionRecord,
+    CreateThreadSandboxRequest, DeleteSandboxRequest, DeleteSandboxResponse,
+    DeploymentMountRecord, ExecSandboxRequest, ExecSandboxResponse, NodeRecord, SandboxResponse,
+    SessionRecord,
 };
-use crate::{EXEC_OUTPUTS_BUCKET, SESSIONS_BUCKET, affinity, subjects};
+use crate::{
+    DEPLOYMENT_MOUNTS_BUCKET, EXEC_OUTPUTS_BUCKET, NODES_BUCKET, SESSIONS_BUCKET, affinity,
+    subjects,
+};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
@@ -56,7 +60,7 @@ impl SandboxNatsClient {
         request: &CreateThreadSandboxRequest,
     ) -> Result<SandboxHandle, SandboxNatsClientError> {
         let sandbox_id = format!("thread-{}-{}", request.deployment_id, request.thread_id);
-        if let Some(handle) = self.try_attach(&sandbox_id).await? {
+        if let Some(handle) = self.try_attach(&request.deployment_id, &sandbox_id).await? {
             return Ok(handle);
         }
         let affinity_key = affinity::thread_key(&request.deployment_id, &request.thread_id);
@@ -75,7 +79,7 @@ impl SandboxNatsClient {
             "task-{}-{}-{}",
             request.deployment_id, request.project_id, request.task_key
         );
-        if let Some(handle) = self.try_attach(&sandbox_id).await? {
+        if let Some(handle) = self.try_attach(&request.deployment_id, &sandbox_id).await? {
             return Ok(handle);
         }
         let affinity_key = affinity::task_key(
@@ -92,8 +96,29 @@ impl SandboxNatsClient {
 
     async fn try_attach(
         &self,
+        deployment_id: &str,
         sandbox_id: &str,
     ) -> Result<Option<SandboxHandle>, SandboxNatsClientError> {
+        let session = match self.read_session(sandbox_id).await? {
+            Some(session) => session,
+            None => return Ok(None),
+        };
+        if !self.is_node_alive(&session.node_id).await? {
+            return Ok(None);
+        }
+        if !self
+            .is_mount_healthy(deployment_id, &session.node_id)
+            .await?
+        {
+            return Ok(None);
+        }
+        Ok(Some(self.handle(session.node_id, session.sandbox_id)))
+    }
+
+    async fn read_session(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Option<SessionRecord>, SandboxNatsClientError> {
         let store = self
             .jetstream
             .get_key_value(SESSIONS_BUCKET)
@@ -108,7 +133,51 @@ impl SandboxNatsClient {
         };
         let session: SessionRecord = serde_json::from_slice(&entry)
             .map_err(|err| SandboxNatsClientError::Decode(format!("decode session: {err}")))?;
-        Ok(Some(self.handle(session.node_id, session.sandbox_id)))
+        Ok(Some(session))
+    }
+
+    async fn is_node_alive(&self, node_id: &str) -> Result<bool, SandboxNatsClientError> {
+        let store = self
+            .jetstream
+            .get_key_value(NODES_BUCKET)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
+        let Some(entry) = store
+            .get(format!("node/{node_id}"))
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?
+        else {
+            return Ok(false);
+        };
+        let node: NodeRecord = serde_json::from_slice(&entry)
+            .map_err(|err| SandboxNatsClientError::Decode(format!("decode node: {err}")))?;
+        let now_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as u64;
+        Ok(now_ms.saturating_sub(node.last_seen_ms) <= NODE_ALIVE_MAX_AGE.as_millis() as u64)
+    }
+
+    async fn is_mount_healthy(
+        &self,
+        deployment_id: &str,
+        node_id: &str,
+    ) -> Result<bool, SandboxNatsClientError> {
+        let store = self
+            .jetstream
+            .get_key_value(DEPLOYMENT_MOUNTS_BUCKET)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
+        let Some(entry) = store
+            .get(format!("deployment/{deployment_id}/{node_id}"))
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?
+        else {
+            return Ok(true);
+        };
+        let mount: DeploymentMountRecord = serde_json::from_slice(&entry)
+            .map_err(|err| SandboxNatsClientError::Decode(format!("decode mount: {err}")))?;
+        Ok(mount.mounted)
     }
 
     pub(crate) fn handle(&self, node_id: String, sandbox_id: String) -> SandboxHandle {

@@ -9,7 +9,7 @@ use thiserror::Error;
 use crate::protocol::{AffinityRecord, DeploymentMountRecord, NodeRecord};
 use crate::{AFFINITY_BUCKET, DEPLOYMENT_MOUNTS_BUCKET, NODES_BUCKET};
 
-const NODE_ALIVE_MAX_AGE: Duration = Duration::from_secs(15);
+pub(crate) const NODE_ALIVE_MAX_AGE: Duration = Duration::from_secs(15);
 
 #[derive(Debug, Clone)]
 pub struct PlacedNode {
