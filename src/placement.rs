@@ -1,13 +1,11 @@
 use std::time::Duration;
 
-use async_nats::jetstream;
 use async_nats::jetstream::kv::Store;
 use futures::StreamExt;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
 
 use crate::protocol::{AffinityRecord, NodeRecord};
-use crate::{AFFINITY_BUCKET, NODES_BUCKET};
 
 pub(crate) const NODE_ALIVE_MAX_AGE: Duration = Duration::from_secs(15);
 
@@ -28,26 +26,18 @@ pub struct PlacementInputs<'a> {
     pub affinity_key: Option<&'a str>,
 }
 
-/// Pick a node for a sandbox.
-///
-/// Order:
-///   1. If an affinity record exists and points at a live node, use that node
-///      (sticky placement keeps a thread on the same VM that already created it).
-///   2. Otherwise, pick the least-loaded live node.
 pub async fn pick_node_for_deployment(
-    jetstream: &jetstream::Context,
+    nodes_store: &Store,
+    affinity_store: &Store,
     inputs: PlacementInputs<'_>,
 ) -> Result<PlacedNode, PlacementError> {
-    let nodes_store = open_bucket(jetstream, NODES_BUCKET).await?;
-    let affinity_store = open_bucket(jetstream, AFFINITY_BUCKET).await?;
-
-    let live_nodes = list_live_nodes(&nodes_store).await?;
+    let live_nodes = list_live_nodes(nodes_store).await?;
     if live_nodes.is_empty() {
         return Err(PlacementError::NoNodes);
     }
 
     if let Some(affinity_key) = inputs.affinity_key {
-        if let Some(record) = read_value::<AffinityRecord>(&affinity_store, affinity_key).await? {
+        if let Some(record) = read_value::<AffinityRecord>(affinity_store, affinity_key).await? {
             if live_nodes.iter().any(|node| node.node_id == record.node_id) {
                 return Ok(PlacedNode {
                     node_id: record.node_id,
@@ -98,13 +88,6 @@ where
     let value = serde_json::from_slice(&bytes)
         .map_err(|err| PlacementError::Nats(format!("decode {key}: {err}")))?;
     Ok(Some(value))
-}
-
-async fn open_bucket(jetstream: &jetstream::Context, bucket: &str) -> Result<Store, PlacementError> {
-    jetstream
-        .get_key_value(bucket)
-        .await
-        .map_err(|err| PlacementError::Nats(format!("open {bucket}: {err}")))
 }
 
 fn unix_time_ms() -> u64 {

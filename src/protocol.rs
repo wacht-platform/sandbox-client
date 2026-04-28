@@ -44,6 +44,48 @@ pub struct DeleteSandboxRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsBlobHandle {
+    pub bucket: String,
+    pub key: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsReadRequest {
+    pub sandbox_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsReadResponse {
+    pub sandbox_id: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub in_object_store: bool,
+    #[serde(default, with = "serde_bytes")]
+    pub inline: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<FsBlobHandle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsWriteRequest {
+    pub sandbox_id: String,
+    pub path: String,
+    pub size_bytes: u64,
+    pub in_object_store: bool,
+    #[serde(default, with = "serde_bytes")]
+    pub inline: Vec<u8>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handle: Option<FsBlobHandle>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsWriteResponse {
+    pub sandbox_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(serialize = "T: Serialize", deserialize = "T: serde::de::DeserializeOwned"))]
 pub struct SandboxResponse<T> {
     pub ok: bool,

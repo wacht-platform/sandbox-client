@@ -1,9 +1,13 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use async_nats::jetstream;
+use async_nats::jetstream::kv::Store;
+use async_nats::jetstream::object_store::ObjectStore;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
+use tokio::sync::OnceCell;
 
 use crate::handle::SandboxHandle;
 use crate::placement::{self, NODE_ALIVE_MAX_AGE, PlacementError, PlacementInputs, PlacedNode};
@@ -12,7 +16,11 @@ use crate::protocol::{
     CreateThreadSandboxRequest, DeleteSandboxRequest, DeleteSandboxResponse, ExecSandboxRequest,
     ExecSandboxResponse, NodeRecord, SandboxResponse, SessionRecord,
 };
-use crate::{EXEC_OUTPUTS_BUCKET, NODES_BUCKET, SESSIONS_BUCKET, affinity, subjects};
+use crate::protocol::{FsBlobHandle, FsReadRequest, FsReadResponse, FsWriteRequest, FsWriteResponse};
+use crate::{
+    AFFINITY_BUCKET, EXEC_OUTPUTS_BUCKET, FS_INLINE_LIMIT, FS_PAYLOADS_BUCKET, NODES_BUCKET,
+    SESSIONS_BUCKET, affinity, subjects,
+};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 const CREATE_SANDBOX_TIMEOUT: Duration = Duration::from_secs(120);
@@ -34,6 +42,16 @@ pub struct SandboxNatsClient {
     nats: async_nats::Client,
     jetstream: jetstream::Context,
     request_timeout: Duration,
+    buckets: Arc<BucketCache>,
+}
+
+#[derive(Default)]
+struct BucketCache {
+    sessions: OnceCell<Store>,
+    nodes: OnceCell<Store>,
+    affinity: OnceCell<Store>,
+    exec_outputs: OnceCell<ObjectStore>,
+    fs_payloads: OnceCell<ObjectStore>,
 }
 
 impl SandboxNatsClient {
@@ -43,12 +61,84 @@ impl SandboxNatsClient {
             nats,
             jetstream,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
+            buckets: Arc::new(BucketCache::default()),
         }
+    }
+
+    async fn sessions_store(&self) -> Result<&Store, SandboxNatsClientError> {
+        self.buckets
+            .sessions
+            .get_or_try_init(|| async {
+                self.jetstream
+                    .get_key_value(SESSIONS_BUCKET)
+                    .await
+                    .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))
+            })
+            .await
+    }
+
+    async fn nodes_store(&self) -> Result<&Store, SandboxNatsClientError> {
+        self.buckets
+            .nodes
+            .get_or_try_init(|| async {
+                self.jetstream
+                    .get_key_value(NODES_BUCKET)
+                    .await
+                    .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))
+            })
+            .await
+    }
+
+    async fn affinity_store(&self) -> Result<&Store, SandboxNatsClientError> {
+        self.buckets
+            .affinity
+            .get_or_try_init(|| async {
+                self.jetstream
+                    .get_key_value(AFFINITY_BUCKET)
+                    .await
+                    .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))
+            })
+            .await
+    }
+
+    async fn exec_outputs_store(&self) -> Result<&ObjectStore, SandboxNatsClientError> {
+        self.buckets
+            .exec_outputs
+            .get_or_try_init(|| async {
+                self.jetstream
+                    .get_object_store(EXEC_OUTPUTS_BUCKET)
+                    .await
+                    .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))
+            })
+            .await
+    }
+
+    async fn fs_payloads_store(&self) -> Result<&ObjectStore, SandboxNatsClientError> {
+        self.buckets
+            .fs_payloads
+            .get_or_try_init(|| async {
+                self.jetstream
+                    .get_object_store(FS_PAYLOADS_BUCKET)
+                    .await
+                    .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))
+            })
+            .await
     }
 
     pub fn with_request_timeout(mut self, timeout: Duration) -> Self {
         self.request_timeout = timeout;
         self
+    }
+
+    pub async fn warm(&self) -> Result<(), SandboxNatsClientError> {
+        let _ = tokio::try_join!(
+            self.sessions_store(),
+            self.nodes_store(),
+            self.affinity_store(),
+            self.exec_outputs_store(),
+            self.fs_payloads_store(),
+        )?;
+        Ok(())
     }
 
     pub async fn thread(
@@ -132,11 +222,7 @@ impl SandboxNatsClient {
     }
 
     pub(crate) async fn forget_session(&self, sandbox_id: &str) -> Result<(), SandboxNatsClientError> {
-        let store = self
-            .jetstream
-            .get_key_value(SESSIONS_BUCKET)
-            .await
-            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
+        let store = self.sessions_store().await?;
         let _ = store.delete(sandbox_id).await;
         Ok(())
     }
@@ -145,11 +231,7 @@ impl SandboxNatsClient {
         &self,
         sandbox_id: &str,
     ) -> Result<Option<SessionRecord>, SandboxNatsClientError> {
-        let store = self
-            .jetstream
-            .get_key_value(SESSIONS_BUCKET)
-            .await
-            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
+        let store = self.sessions_store().await?;
         let Some(entry) = store
             .get(sandbox_id)
             .await
@@ -163,11 +245,7 @@ impl SandboxNatsClient {
     }
 
     async fn is_node_alive(&self, node_id: &str) -> Result<bool, SandboxNatsClientError> {
-        let store = self
-            .jetstream
-            .get_key_value(NODES_BUCKET)
-            .await
-            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
+        let store = self.nodes_store().await?;
         let Some(entry) = store
             .get(format!("node/{node_id}"))
             .await
@@ -192,8 +270,11 @@ impl SandboxNatsClient {
         &self,
         affinity_key: Option<&str>,
     ) -> Result<PlacedNode, SandboxNatsClientError> {
+        let nodes = self.nodes_store().await?;
+        let affinity = self.affinity_store().await?;
         Ok(placement::pick_node_for_deployment(
-            &self.jetstream,
+            nodes,
+            affinity,
             PlacementInputs { affinity_key },
         )
         .await?)
@@ -278,16 +359,107 @@ impl SandboxNatsClient {
         self.request(&subjects::delete(node_id), request).await
     }
 
+    pub(crate) async fn fs_read(
+        &self,
+        node_id: &str,
+        sandbox_id: &str,
+        path: &str,
+    ) -> Result<Vec<u8>, SandboxNatsClientError> {
+        let response: FsReadResponse = self
+            .request(
+                &subjects::fs_read(node_id),
+                &FsReadRequest {
+                    sandbox_id: sandbox_id.to_string(),
+                    path: path.to_string(),
+                },
+            )
+            .await?;
+        if response.in_object_store {
+            let handle = response.handle.ok_or_else(|| {
+                SandboxNatsClientError::Decode("fs_read: missing object store handle".into())
+            })?;
+            self.read_fs_object(&handle).await
+        } else {
+            Ok(response.inline)
+        }
+    }
+
+    pub(crate) async fn fs_write(
+        &self,
+        node_id: &str,
+        sandbox_id: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<FsWriteResponse, SandboxNatsClientError> {
+        let request = if content.len() <= FS_INLINE_LIMIT {
+            FsWriteRequest {
+                sandbox_id: sandbox_id.to_string(),
+                path: path.to_string(),
+                size_bytes: content.len() as u64,
+                in_object_store: false,
+                inline: content.to_vec(),
+                handle: None,
+            }
+        } else {
+            let key = format!(
+                "{sandbox_id}/write/{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_nanos())
+                    .unwrap_or(0),
+            );
+            self.put_fs_object(&key, content).await?;
+            FsWriteRequest {
+                sandbox_id: sandbox_id.to_string(),
+                path: path.to_string(),
+                size_bytes: content.len() as u64,
+                in_object_store: true,
+                inline: Vec::new(),
+                handle: Some(FsBlobHandle {
+                    bucket: FS_PAYLOADS_BUCKET.to_string(),
+                    key,
+                }),
+            }
+        };
+        self.request(&subjects::fs_write(node_id), &request).await
+    }
+
+    async fn read_fs_object(
+        &self,
+        handle: &FsBlobHandle,
+    ) -> Result<Vec<u8>, SandboxNatsClientError> {
+        let os = self.fs_payloads_store().await?;
+        let mut obj = os
+            .get(&handle.key)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(format!("fs_read get {}: {err}", handle.key)))?;
+        let mut buf = Vec::new();
+        use tokio::io::AsyncReadExt;
+        obj.read_to_end(&mut buf)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(format!("fs_read body {}: {err}", handle.key)))?;
+        Ok(buf)
+    }
+
+    async fn put_fs_object(
+        &self,
+        key: &str,
+        content: &[u8],
+    ) -> Result<(), SandboxNatsClientError> {
+        let os = self.fs_payloads_store().await?;
+        let mut cursor = std::io::Cursor::new(content.to_vec());
+        os.put(key, &mut cursor)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(format!("fs_write put {key}: {err}")))?;
+        Ok(())
+    }
+
     pub(crate) async fn read_exec_object(
         &self,
         prefix: &str,
         stream: &str,
     ) -> Result<Vec<u8>, SandboxNatsClientError> {
-        let os = self
-            .jetstream
-            .get_object_store(EXEC_OUTPUTS_BUCKET)
-            .await
-            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
+        let os = self.exec_outputs_store().await?;
         let key = format!("{prefix}/{stream}");
         let mut obj = os
             .get(&key)

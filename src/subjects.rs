@@ -17,3 +17,11 @@ pub fn exec_cancel(node_id: &str) -> String {
 pub fn delete(node_id: &str) -> String {
     format!("sandbox.node.{node_id}.delete")
 }
+
+pub fn fs_read(node_id: &str) -> String {
+    format!("sandbox.node.{node_id}.fs.read")
+}
+
+pub fn fs_write(node_id: &str) -> String {
+    format!("sandbox.node.{node_id}.fs.write")
+}

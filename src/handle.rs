@@ -61,6 +61,24 @@ impl SandboxHandle {
         Ok(response.cancelled)
     }
 
+    pub async fn read_file(&self, path: &str) -> Result<Vec<u8>, SandboxNatsClientError> {
+        self.client
+            .fs_read(&self.node_id, &self.sandbox_id, path)
+            .await
+    }
+
+    pub async fn write_file(
+        &self,
+        path: &str,
+        content: &[u8],
+    ) -> Result<(), SandboxNatsClientError> {
+        let _ = self
+            .client
+            .fs_write(&self.node_id, &self.sandbox_id, path, content)
+            .await?;
+        Ok(())
+    }
+
     pub async fn delete(&self) -> Result<DeleteSandboxResponse, SandboxNatsClientError> {
         self.client
             .delete(
