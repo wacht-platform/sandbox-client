@@ -1,7 +1,6 @@
 use std::time::Duration;
 
 use async_nats::jetstream;
-use async_nats::jetstream::kv::Store;
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use thiserror::Error;
@@ -57,7 +56,7 @@ impl SandboxNatsClient {
         request: &CreateThreadSandboxRequest,
     ) -> Result<SandboxHandle, SandboxNatsClientError> {
         let sandbox_id = format!("thread-{}-{}", request.deployment_id, request.thread_id);
-        if let Some(handle) = self.try_attach(&request.deployment_id, &sandbox_id).await? {
+        if let Some(handle) = self.try_attach(&sandbox_id).await? {
             tracing::info!(
                 target: "wacht_sandbox_client",
                 sandbox_id = %sandbox_id,
@@ -68,7 +67,7 @@ impl SandboxNatsClient {
         }
         let affinity_key = affinity::thread_key(&request.deployment_id, &request.thread_id);
         let placed = self
-            .place_with_retry(&request.deployment_id, Some(&affinity_key))
+            .place_with_retry(Some(&affinity_key))
             .await?;
         tracing::info!(
             target: "wacht_sandbox_client",
@@ -88,7 +87,7 @@ impl SandboxNatsClient {
             "task-{}-{}-{}",
             request.deployment_id, request.project_id, request.task_key
         );
-        if let Some(handle) = self.try_attach(&request.deployment_id, &sandbox_id).await? {
+        if let Some(handle) = self.try_attach(&sandbox_id).await? {
             return Ok(handle);
         }
         let affinity_key = affinity::task_key(
@@ -97,7 +96,7 @@ impl SandboxNatsClient {
             &request.task_key,
         );
         let placed = self
-            .place_with_retry(&request.deployment_id, Some(&affinity_key))
+            .place_with_retry(Some(&affinity_key))
             .await?;
         let response = self.create_task(&placed.node_id, request).await?;
         Ok(self.handle(placed.node_id, response.sandbox_id))
@@ -105,7 +104,6 @@ impl SandboxNatsClient {
 
     async fn try_attach(
         &self,
-        _deployment_id: &str,
         sandbox_id: &str,
     ) -> Result<Option<SandboxHandle>, SandboxNatsClientError> {
         let session = match self.read_session(sandbox_id).await? {
@@ -192,29 +190,24 @@ impl SandboxNatsClient {
 
     pub(crate) async fn place(
         &self,
-        deployment_id: &str,
         affinity_key: Option<&str>,
     ) -> Result<PlacedNode, SandboxNatsClientError> {
         Ok(placement::pick_node_for_deployment(
             &self.jetstream,
-            PlacementInputs {
-                deployment_id,
-                affinity_key,
-            },
+            PlacementInputs { affinity_key },
         )
         .await?)
     }
 
     pub(crate) async fn place_with_retry(
         &self,
-        deployment_id: &str,
         affinity_key: Option<&str>,
     ) -> Result<PlacedNode, SandboxNatsClientError> {
         const ATTEMPTS: u32 = 6;
         let mut delay = std::time::Duration::from_millis(500);
         let mut last_err: Option<SandboxNatsClientError> = None;
         for attempt in 0..ATTEMPTS {
-            match self.place(deployment_id, affinity_key).await {
+            match self.place(affinity_key).await {
                 Ok(node) => return Ok(node),
                 Err(SandboxNatsClientError::Placement(PlacementError::NoNodes)) => {
                     tracing::warn!(
@@ -390,13 +383,3 @@ impl SandboxNatsClient {
     }
 }
 
-async fn read_chunk(store: &Store, key: &str) -> Result<Vec<u8>, SandboxNatsClientError> {
-    store
-        .get(key)
-        .await
-        .map_err(|err| SandboxNatsClientError::Nats(format!("read {key}: {err}")))?
-        .map(|bytes| bytes.to_vec())
-        .ok_or_else(|| {
-            SandboxNatsClientError::Nats(format!("missing exec output chunk {key} (expired?)"))
-        })
-}

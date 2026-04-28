@@ -25,9 +25,6 @@ pub enum PlacementError {
 }
 
 pub struct PlacementInputs<'a> {
-    /// Kept for API compatibility; no longer used since every Firecracker VM
-    /// mounts its own S3 paths fresh.
-    pub deployment_id: &'a str,
     pub affinity_key: Option<&'a str>,
 }
 
