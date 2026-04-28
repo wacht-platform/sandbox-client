@@ -11,13 +11,11 @@ pub use handle::SandboxHandle;
 pub use protocol::{
     AffinityRecord, CancelExecRequest, CancelExecResponse, CreateSandboxResponse,
     CreateTaskSandboxRequest, CreateThreadSandboxRequest, DeleteSandboxRequest,
-    DeleteSandboxResponse, DeploymentMountRecord, ExecOutputHandle, ExecSandboxRequest,
-    ExecSandboxResponse, ExecStreamSummary, NodeCapacity, NodeRecord, SandboxResponse,
-    SessionRecord,
+    DeleteSandboxResponse, ExecOutputHandle, ExecSandboxRequest, ExecSandboxResponse,
+    ExecStreamSummary, NodeCapacity, NodeRecord, SandboxResponse, SessionRecord,
 };
 
 pub const NODES_BUCKET: &str = "sandbox_nodes";
 pub const AFFINITY_BUCKET: &str = "sandbox_affinity";
 pub const SESSIONS_BUCKET: &str = "sandbox_sessions";
-pub const DEPLOYMENT_MOUNTS_BUCKET: &str = "sandbox_deployment_mounts";
 pub const EXEC_OUTPUTS_BUCKET: &str = "sandbox_exec_outputs";

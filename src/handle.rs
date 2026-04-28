@@ -35,9 +35,16 @@ impl SandboxHandle {
         request_timeout: Duration,
     ) -> Result<ExecSandboxResponse, SandboxNatsClientError> {
         request.sandbox_id = self.sandbox_id.clone();
-        self.client
+        let result = self
+            .client
             .exec(&self.node_id, &request, request_timeout)
-            .await
+            .await;
+        if let Err(SandboxNatsClientError::Daemon(msg)) = &result {
+            if msg.contains("sandbox not found on this node") {
+                let _ = self.client.forget_session(&self.sandbox_id).await;
+            }
+        }
+        result
     }
 
     pub async fn cancel(&self, exec_id: &str) -> Result<bool, SandboxNatsClientError> {

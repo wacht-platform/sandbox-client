@@ -10,16 +10,13 @@ use crate::handle::SandboxHandle;
 use crate::placement::{self, NODE_ALIVE_MAX_AGE, PlacementError, PlacementInputs, PlacedNode};
 use crate::protocol::{
     CancelExecRequest, CancelExecResponse, CreateSandboxResponse, CreateTaskSandboxRequest,
-    CreateThreadSandboxRequest, DeleteSandboxRequest, DeleteSandboxResponse,
-    DeploymentMountRecord, ExecSandboxRequest, ExecSandboxResponse, NodeRecord, SandboxResponse,
-    SessionRecord,
+    CreateThreadSandboxRequest, DeleteSandboxRequest, DeleteSandboxResponse, ExecSandboxRequest,
+    ExecSandboxResponse, NodeRecord, SandboxResponse, SessionRecord,
 };
-use crate::{
-    DEPLOYMENT_MOUNTS_BUCKET, EXEC_OUTPUTS_BUCKET, NODES_BUCKET, SESSIONS_BUCKET, affinity,
-    subjects,
-};
+use crate::{EXEC_OUTPUTS_BUCKET, NODES_BUCKET, SESSIONS_BUCKET, affinity, subjects};
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const CREATE_SANDBOX_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Debug, Error)]
 pub enum SandboxNatsClientError {
@@ -61,12 +58,24 @@ impl SandboxNatsClient {
     ) -> Result<SandboxHandle, SandboxNatsClientError> {
         let sandbox_id = format!("thread-{}-{}", request.deployment_id, request.thread_id);
         if let Some(handle) = self.try_attach(&request.deployment_id, &sandbox_id).await? {
+            tracing::info!(
+                target: "wacht_sandbox_client",
+                sandbox_id = %sandbox_id,
+                node_id = %handle.node_id(),
+                "thread: attached existing session",
+            );
             return Ok(handle);
         }
         let affinity_key = affinity::thread_key(&request.deployment_id, &request.thread_id);
         let placed = self
-            .place(&request.deployment_id, Some(&affinity_key))
+            .place_with_retry(&request.deployment_id, Some(&affinity_key))
             .await?;
+        tracing::info!(
+            target: "wacht_sandbox_client",
+            sandbox_id = %sandbox_id,
+            node_id = %placed.node_id,
+            "thread: placed; creating",
+        );
         let response = self.create_thread(&placed.node_id, request).await?;
         Ok(self.handle(placed.node_id, response.sandbox_id))
     }
@@ -88,7 +97,7 @@ impl SandboxNatsClient {
             &request.task_key,
         );
         let placed = self
-            .place(&request.deployment_id, Some(&affinity_key))
+            .place_with_retry(&request.deployment_id, Some(&affinity_key))
             .await?;
         let response = self.create_task(&placed.node_id, request).await?;
         Ok(self.handle(placed.node_id, response.sandbox_id))
@@ -96,23 +105,42 @@ impl SandboxNatsClient {
 
     async fn try_attach(
         &self,
-        deployment_id: &str,
+        _deployment_id: &str,
         sandbox_id: &str,
     ) -> Result<Option<SandboxHandle>, SandboxNatsClientError> {
         let session = match self.read_session(sandbox_id).await? {
             Some(session) => session,
-            None => return Ok(None),
+            None => {
+                tracing::info!(
+                    target: "wacht_sandbox_client",
+                    sandbox_id = %sandbox_id,
+                    "try_attach: no session record",
+                );
+                return Ok(None);
+            }
         };
-        if !self.is_node_alive(&session.node_id).await? {
-            return Ok(None);
-        }
-        if !self
-            .is_mount_healthy(deployment_id, &session.node_id)
-            .await?
-        {
+        let alive = self.is_node_alive(&session.node_id).await?;
+        tracing::info!(
+            target: "wacht_sandbox_client",
+            sandbox_id = %sandbox_id,
+            node_id = %session.node_id,
+            alive,
+            "try_attach: session validation",
+        );
+        if !alive {
             return Ok(None);
         }
         Ok(Some(self.handle(session.node_id, session.sandbox_id)))
+    }
+
+    pub(crate) async fn forget_session(&self, sandbox_id: &str) -> Result<(), SandboxNatsClientError> {
+        let store = self
+            .jetstream
+            .get_key_value(SESSIONS_BUCKET)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
+        let _ = store.delete(sandbox_id).await;
+        Ok(())
     }
 
     async fn read_session(
@@ -158,28 +186,6 @@ impl SandboxNatsClient {
         Ok(now_ms.saturating_sub(node.last_seen_ms) <= NODE_ALIVE_MAX_AGE.as_millis() as u64)
     }
 
-    async fn is_mount_healthy(
-        &self,
-        deployment_id: &str,
-        node_id: &str,
-    ) -> Result<bool, SandboxNatsClientError> {
-        let store = self
-            .jetstream
-            .get_key_value(DEPLOYMENT_MOUNTS_BUCKET)
-            .await
-            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
-        let Some(entry) = store
-            .get(format!("deployment/{deployment_id}/{node_id}"))
-            .await
-            .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?
-        else {
-            return Ok(true);
-        };
-        let mount: DeploymentMountRecord = serde_json::from_slice(&entry)
-            .map_err(|err| SandboxNatsClientError::Decode(format!("decode mount: {err}")))?;
-        Ok(mount.mounted)
-    }
-
     pub(crate) fn handle(&self, node_id: String, sandbox_id: String) -> SandboxHandle {
         SandboxHandle::new(self.clone(), node_id, sandbox_id)
     }
@@ -199,13 +205,45 @@ impl SandboxNatsClient {
         .await?)
     }
 
+    pub(crate) async fn place_with_retry(
+        &self,
+        deployment_id: &str,
+        affinity_key: Option<&str>,
+    ) -> Result<PlacedNode, SandboxNatsClientError> {
+        const ATTEMPTS: u32 = 6;
+        let mut delay = std::time::Duration::from_millis(500);
+        let mut last_err: Option<SandboxNatsClientError> = None;
+        for attempt in 0..ATTEMPTS {
+            match self.place(deployment_id, affinity_key).await {
+                Ok(node) => return Ok(node),
+                Err(SandboxNatsClientError::Placement(PlacementError::NoNodes)) => {
+                    tracing::warn!(
+                        target: "wacht_sandbox_client",
+                        attempt = attempt + 1,
+                        delay_ms = delay.as_millis() as u64,
+                        "place: no live nodes — backing off",
+                    );
+                    last_err = Some(SandboxNatsClientError::Placement(PlacementError::NoNodes));
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(std::time::Duration::from_secs(4));
+                }
+                Err(e) => return Err(e),
+            }
+        }
+        Err(last_err.unwrap_or(SandboxNatsClientError::Placement(PlacementError::NoNodes)))
+    }
+
     pub(crate) async fn create_thread(
         &self,
         node_id: &str,
         request: &CreateThreadSandboxRequest,
     ) -> Result<CreateSandboxResponse, SandboxNatsClientError> {
-        self.request(&subjects::thread_create(node_id), request)
-            .await
+        self.request_with_timeout(
+            &subjects::thread_create(node_id),
+            request,
+            CREATE_SANDBOX_TIMEOUT,
+        )
+        .await
     }
 
     pub(crate) async fn create_task(
@@ -213,7 +251,12 @@ impl SandboxNatsClient {
         node_id: &str,
         request: &CreateTaskSandboxRequest,
     ) -> Result<CreateSandboxResponse, SandboxNatsClientError> {
-        self.request(&subjects::task_create(node_id), request).await
+        self.request_with_timeout(
+            &subjects::task_create(node_id),
+            request,
+            CREATE_SANDBOX_TIMEOUT,
+        )
+        .await
     }
 
     pub(crate) async fn exec(
@@ -290,13 +333,45 @@ impl SandboxNatsClient {
     {
         let payload = serde_json::to_vec(body)
             .map_err(|err| SandboxNatsClientError::Decode(format!("encode request: {err}")))?;
+        let started = std::time::Instant::now();
+        tracing::info!(
+            target: "wacht_sandbox_client",
+            subject = %subject,
+            timeout_ms = timeout.as_millis() as u64,
+            payload_bytes = payload.len(),
+            "nats request start",
+        );
         let response = tokio::time::timeout(
             timeout,
             self.nats.request(subject.to_string(), payload.into()),
         )
         .await
-        .map_err(|_| SandboxNatsClientError::Nats(format!("timed out waiting for {subject}")))?
-        .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
+        .map_err(|_| {
+            tracing::warn!(
+                target: "wacht_sandbox_client",
+                subject = %subject,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "nats request timed out",
+            );
+            SandboxNatsClientError::Nats(format!("timed out waiting for {subject}"))
+        })?
+        .map_err(|err| {
+            tracing::warn!(
+                target: "wacht_sandbox_client",
+                subject = %subject,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                error = %err,
+                "nats request errored",
+            );
+            SandboxNatsClientError::Nats(err.to_string())
+        })?;
+        tracing::info!(
+            target: "wacht_sandbox_client",
+            subject = %subject,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            response_bytes = response.payload.len(),
+            "nats request returned",
+        );
 
         let envelope: SandboxResponse<Res> = serde_json::from_slice(&response.payload)
             .map_err(|err| SandboxNatsClientError::Decode(err.to_string()))?;

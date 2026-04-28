@@ -125,11 +125,7 @@ pub struct NodeRecord {
     pub started_at_ms: u64,
     pub last_seen_ms: u64,
     pub nats_subject_prefix: String,
-    pub root: String,
-    pub runtime: String,
-    pub image: String,
     pub capacity: NodeCapacity,
-    pub hot_deployments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -164,13 +160,3 @@ pub struct SessionRecord {
     pub status: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DeploymentMountRecord {
-    pub deployment_id: String,
-    pub node_id: String,
-    pub root: String,
-    pub ref_count: usize,
-    pub status: String,
-    pub mounted: bool,
-    pub updated_at_ms: u64,
-}
