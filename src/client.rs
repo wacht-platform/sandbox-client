@@ -285,27 +285,27 @@ impl SandboxNatsClient {
         self.request(&subjects::delete(node_id), request).await
     }
 
-    pub(crate) async fn read_exec_stream(
+    pub(crate) async fn read_exec_object(
         &self,
         prefix: &str,
         stream: &str,
-        chunk_count: usize,
     ) -> Result<Vec<u8>, SandboxNatsClientError> {
-        if chunk_count == 0 {
-            return Ok(Vec::new());
-        }
-        let store = self
+        let os = self
             .jetstream
-            .get_key_value(EXEC_OUTPUTS_BUCKET)
+            .get_object_store(EXEC_OUTPUTS_BUCKET)
             .await
             .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
-        let mut out = Vec::new();
-        for idx in 0..chunk_count {
-            let key = format!("{prefix}/{stream}/{idx}");
-            let bytes = read_chunk(&store, &key).await?;
-            out.extend_from_slice(&bytes);
-        }
-        Ok(out)
+        let key = format!("{prefix}/{stream}");
+        let mut obj = os
+            .get(&key)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(format!("get {key}: {err}")))?;
+        let mut buf = Vec::new();
+        use tokio::io::AsyncReadExt;
+        obj.read_to_end(&mut buf)
+            .await
+            .map_err(|err| SandboxNatsClientError::Nats(format!("read {key}: {err}")))?;
+        Ok(buf)
     }
 
     async fn request<Req, Res>(

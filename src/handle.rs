@@ -76,14 +76,20 @@ impl SandboxHandle {
         &self,
         response: &ExecSandboxResponse,
     ) -> Result<(Vec<u8>, Vec<u8>), SandboxNatsClientError> {
-        let stdout = self
-            .client
-            .read_exec_stream(&response.output_handle.prefix, "stdout", response.stdout.chunk_count)
-            .await?;
-        let stderr = self
-            .client
-            .read_exec_stream(&response.output_handle.prefix, "stderr", response.stderr.chunk_count)
-            .await?;
+        let stdout = if response.stdout.in_object_store {
+            self.client
+                .read_exec_object(&response.output_handle.prefix, "stdout")
+                .await?
+        } else {
+            response.stdout_inline.clone()
+        };
+        let stderr = if response.stderr.in_object_store {
+            self.client
+                .read_exec_object(&response.output_handle.prefix, "stderr")
+                .await?
+        } else {
+            response.stderr_inline.clone()
+        };
         Ok((stdout, stderr))
     }
 }

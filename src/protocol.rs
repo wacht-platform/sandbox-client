@@ -86,9 +86,8 @@ pub struct ExecOutputHandle {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExecStreamSummary {
     pub total_bytes: u64,
-    pub chunk_count: usize,
-    pub chunk_size_bytes: usize,
     pub truncated: bool,
+    pub in_object_store: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,8 +97,10 @@ pub struct ExecSandboxResponse {
     pub exit_code: i32,
     pub timed_out: bool,
     pub cancelled: bool,
-    pub stdout_inline: String,
-    pub stderr_inline: String,
+    #[serde(with = "serde_bytes")]
+    pub stdout_inline: Vec<u8>,
+    #[serde(with = "serde_bytes")]
+    pub stderr_inline: Vec<u8>,
     pub stdout: ExecStreamSummary,
     pub stderr: ExecStreamSummary,
     pub output_handle: ExecOutputHandle,
