@@ -22,27 +22,19 @@ pub enum PlacementError {
     Nats(String),
 }
 
-pub struct PlacementInputs<'a> {
-    pub affinity_key: Option<&'a str>,
-}
-
-pub async fn pick_node_for_deployment(
-    nodes_store: &Store,
-    affinity_store: &Store,
-    inputs: PlacementInputs<'_>,
+pub fn pick_from_live_nodes(
+    live_nodes: Vec<NodeRecord>,
+    affinity_record: Option<AffinityRecord>,
 ) -> Result<PlacedNode, PlacementError> {
-    let live_nodes = list_live_nodes(nodes_store).await?;
     if live_nodes.is_empty() {
         return Err(PlacementError::NoNodes);
     }
 
-    if let Some(affinity_key) = inputs.affinity_key {
-        if let Some(record) = read_value::<AffinityRecord>(affinity_store, affinity_key).await? {
-            if live_nodes.iter().any(|node| node.node_id == record.node_id) {
-                return Ok(PlacedNode {
-                    node_id: record.node_id,
-                });
-            }
+    if let Some(record) = affinity_record {
+        if live_nodes.iter().any(|node| node.node_id == record.node_id) {
+            return Ok(PlacedNode {
+                node_id: record.node_id,
+            });
         }
     }
 
@@ -56,7 +48,14 @@ pub async fn pick_node_for_deployment(
     })
 }
 
-async fn list_live_nodes(store: &Store) -> Result<Vec<NodeRecord>, PlacementError> {
+pub async fn read_affinity_record(
+    affinity_store: &Store,
+    affinity_key: &str,
+) -> Result<Option<AffinityRecord>, PlacementError> {
+    read_value::<AffinityRecord>(affinity_store, affinity_key).await
+}
+
+pub async fn list_live_nodes(store: &Store) -> Result<Vec<NodeRecord>, PlacementError> {
     let now_ms = unix_time_ms();
     let mut keys = store
         .keys()

@@ -85,6 +85,23 @@ pub struct FsWriteResponse {
     pub path: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxErrorKind {
+    NotConfigured,
+    InvalidRequest,
+    NotFound,
+    Timeout,
+    Cancelled,
+    Internal,
+}
+
+impl Default for SandboxErrorKind {
+    fn default() -> Self {
+        SandboxErrorKind::Internal
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(bound(serialize = "T: Serialize", deserialize = "T: serde::de::DeserializeOwned"))]
 pub struct SandboxResponse<T> {
@@ -93,6 +110,8 @@ pub struct SandboxResponse<T> {
     pub data: Option<T>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<SandboxErrorKind>,
 }
 
 impl<T> SandboxResponse<T> {
@@ -101,14 +120,20 @@ impl<T> SandboxResponse<T> {
             ok: true,
             data: Some(data),
             error: None,
+            kind: None,
         }
     }
 
     pub fn error(error: impl Into<String>) -> Self {
+        Self::error_with_kind(error, SandboxErrorKind::Internal)
+    }
+
+    pub fn error_with_kind(error: impl Into<String>, kind: SandboxErrorKind) -> Self {
         Self {
             ok: false,
             data: None,
             error: Some(error.into()),
+            kind: Some(kind),
         }
     }
 }

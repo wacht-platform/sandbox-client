@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_nats::jetstream;
 use async_nats::jetstream::kv::Store;
@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::sync::OnceCell;
 
 use crate::handle::SandboxHandle;
-use crate::placement::{self, NODE_ALIVE_MAX_AGE, PlacementError, PlacementInputs, PlacedNode};
+use crate::placement::{self, NODE_ALIVE_MAX_AGE, PlacementError, PlacedNode};
 use crate::protocol::{
     CancelExecRequest, CancelExecResponse, CreateSandboxResponse, CreateTaskSandboxRequest,
     CreateThreadSandboxRequest, DeleteSandboxRequest, DeleteSandboxResponse, ExecSandboxRequest,
@@ -29,13 +29,19 @@ const CREATE_SANDBOX_TIMEOUT: Duration = Duration::from_secs(120);
 pub enum SandboxNatsClientError {
     #[error("nats request failed: {0}")]
     Nats(String),
-    #[error("daemon error: {0}")]
-    Daemon(String),
+    #[error("daemon error ({kind:?}): {message}")]
+    Daemon {
+        message: String,
+        kind: crate::protocol::SandboxErrorKind,
+    },
     #[error("malformed response: {0}")]
     Decode(String),
     #[error("placement: {0}")]
     Placement(#[from] PlacementError),
 }
+
+const LIVE_NODES_FRESH_TTL: Duration = Duration::from_secs(30);
+const LIVE_NODES_STALE_TTL: Duration = Duration::from_secs(90);
 
 #[derive(Clone)]
 pub struct SandboxNatsClient {
@@ -43,6 +49,7 @@ pub struct SandboxNatsClient {
     jetstream: jetstream::Context,
     request_timeout: Duration,
     buckets: Arc<BucketCache>,
+    live_nodes: Arc<LiveNodesCache>,
 }
 
 #[derive(Default)]
@@ -54,6 +61,26 @@ struct BucketCache {
     fs_payloads: OnceCell<ObjectStore>,
 }
 
+struct LiveNodesCache {
+    state: tokio::sync::RwLock<Option<CachedLiveNodes>>,
+    refreshing: tokio::sync::Mutex<()>,
+}
+
+impl Default for LiveNodesCache {
+    fn default() -> Self {
+        Self {
+            state: tokio::sync::RwLock::new(None),
+            refreshing: tokio::sync::Mutex::new(()),
+        }
+    }
+}
+
+#[derive(Clone)]
+struct CachedLiveNodes {
+    nodes: Vec<NodeRecord>,
+    fetched_at: Instant,
+}
+
 impl SandboxNatsClient {
     pub fn new(nats: async_nats::Client) -> Self {
         let jetstream = jetstream::new(nats.clone());
@@ -62,7 +89,54 @@ impl SandboxNatsClient {
             jetstream,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             buckets: Arc::new(BucketCache::default()),
+            live_nodes: Arc::new(LiveNodesCache::default()),
         }
+    }
+
+    async fn live_nodes_swr(&self) -> Result<Vec<NodeRecord>, SandboxNatsClientError> {
+        {
+            let cache = self.live_nodes.state.read().await;
+            if let Some(cached) = cache.as_ref() {
+                let age = cached.fetched_at.elapsed();
+                if age < LIVE_NODES_FRESH_TTL {
+                    return Ok(cached.nodes.clone());
+                }
+                if age < LIVE_NODES_STALE_TTL {
+                    let nodes = cached.nodes.clone();
+                    drop(cache);
+                    self.spawn_live_nodes_refresh();
+                    return Ok(nodes);
+                }
+            }
+        }
+        self.refresh_live_nodes_now().await
+    }
+
+    fn spawn_live_nodes_refresh(&self) {
+        let client = self.clone();
+        tokio::spawn(async move {
+            let Ok(_guard) = client.live_nodes.refreshing.try_lock() else {
+                return;
+            };
+            if let Err(err) = client.refresh_live_nodes_now().await {
+                tracing::warn!(
+                    target: "wacht_sandbox_client",
+                    error = %err,
+                    "live_nodes: background refresh failed",
+                );
+            }
+        });
+    }
+
+    async fn refresh_live_nodes_now(&self) -> Result<Vec<NodeRecord>, SandboxNatsClientError> {
+        let store = self.nodes_store().await?;
+        let nodes = placement::list_live_nodes(store).await?;
+        let mut writer = self.live_nodes.state.write().await;
+        *writer = Some(CachedLiveNodes {
+            nodes: nodes.clone(),
+            fetched_at: Instant::now(),
+        });
+        Ok(nodes)
     }
 
     async fn sessions_store(&self) -> Result<&Store, SandboxNatsClientError> {
@@ -146,19 +220,36 @@ impl SandboxNatsClient {
         request: &CreateThreadSandboxRequest,
     ) -> Result<SandboxHandle, SandboxNatsClientError> {
         let sandbox_id = format!("thread-{}-{}", request.deployment_id, request.thread_id);
-        if let Some(handle) = self.try_attach(&sandbox_id).await? {
-            tracing::info!(
-                target: "wacht_sandbox_client",
-                sandbox_id = %sandbox_id,
-                node_id = %handle.node_id(),
-                "thread: attached existing session",
-            );
-            return Ok(handle);
-        }
         let affinity_key = affinity::thread_key(&request.deployment_id, &request.thread_id);
-        let placed = self
-            .place_with_retry(Some(&affinity_key))
-            .await?;
+
+        let place_task = {
+            let client = self.clone();
+            let key = affinity_key.clone();
+            tokio::spawn(async move { client.place_with_retry(Some(&key)).await })
+        };
+
+        match self.try_attach(&sandbox_id).await? {
+            Some(handle) => {
+                place_task.abort();
+                tracing::info!(
+                    target: "wacht_sandbox_client",
+                    sandbox_id = %sandbox_id,
+                    node_id = %handle.node_id(),
+                    "thread: attached existing session",
+                );
+                return Ok(handle);
+            }
+            None => {}
+        }
+
+        let placed = match place_task.await {
+            Ok(result) => result?,
+            Err(err) => {
+                return Err(SandboxNatsClientError::Nats(format!(
+                    "place task panicked: {err}"
+                )))
+            }
+        };
         tracing::info!(
             target: "wacht_sandbox_client",
             sandbox_id = %sandbox_id,
@@ -177,17 +268,34 @@ impl SandboxNatsClient {
             "task-{}-{}-{}",
             request.deployment_id, request.project_id, request.task_key
         );
-        if let Some(handle) = self.try_attach(&sandbox_id).await? {
-            return Ok(handle);
-        }
         let affinity_key = affinity::task_key(
             &request.deployment_id,
             &request.project_id,
             &request.task_key,
         );
-        let placed = self
-            .place_with_retry(Some(&affinity_key))
-            .await?;
+
+        let place_task = {
+            let client = self.clone();
+            let key = affinity_key.clone();
+            tokio::spawn(async move { client.place_with_retry(Some(&key)).await })
+        };
+
+        match self.try_attach(&sandbox_id).await? {
+            Some(handle) => {
+                place_task.abort();
+                return Ok(handle);
+            }
+            None => {}
+        }
+
+        let placed = match place_task.await {
+            Ok(result) => result?,
+            Err(err) => {
+                return Err(SandboxNatsClientError::Nats(format!(
+                    "place task panicked: {err}"
+                )))
+            }
+        };
         let response = self.create_task(&placed.node_id, request).await?;
         Ok(self.handle(placed.node_id, response.sandbox_id))
     }
@@ -270,14 +378,28 @@ impl SandboxNatsClient {
         &self,
         affinity_key: Option<&str>,
     ) -> Result<PlacedNode, SandboxNatsClientError> {
-        let nodes = self.nodes_store().await?;
-        let affinity = self.affinity_store().await?;
-        Ok(placement::pick_node_for_deployment(
-            nodes,
-            affinity,
-            PlacementInputs { affinity_key },
-        )
-        .await?)
+        let pick_t = std::time::Instant::now();
+        let affinity_fut = async {
+            match affinity_key {
+                Some(key) => {
+                    let store = self.affinity_store().await?;
+                    placement::read_affinity_record(store, key)
+                        .await
+                        .map_err(SandboxNatsClientError::from)
+                }
+                None => Ok(None),
+            }
+        };
+        let (live_nodes, affinity_record) =
+            tokio::try_join!(self.live_nodes_swr(), affinity_fut)?;
+        let result = placement::pick_from_live_nodes(live_nodes, affinity_record)?;
+        tracing::info!(
+            target: "wacht_sandbox_client",
+            pick_ms = pick_t.elapsed().as_millis() as u64,
+            node_id = %result.node_id,
+            "place: picked",
+        );
+        Ok(result)
     }
 
     pub(crate) async fn place_with_retry(
@@ -546,11 +668,11 @@ impl SandboxNatsClient {
                 SandboxNatsClientError::Decode("daemon returned ok=true without data".into())
             })
         } else {
-            Err(SandboxNatsClientError::Daemon(
-                envelope
-                    .error
-                    .unwrap_or_else(|| "daemon returned ok=false without error".into()),
-            ))
+            let message = envelope
+                .error
+                .unwrap_or_else(|| "daemon returned ok=false without error".into());
+            let kind = envelope.kind.unwrap_or_default();
+            Err(SandboxNatsClientError::Daemon { message, kind })
         }
     }
 }

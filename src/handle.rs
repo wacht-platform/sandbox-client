@@ -3,6 +3,7 @@ use std::time::Duration;
 use crate::client::{SandboxNatsClient, SandboxNatsClientError};
 use crate::protocol::{
     CancelExecRequest, DeleteSandboxResponse, ExecSandboxRequest, ExecSandboxResponse,
+    SandboxErrorKind,
 };
 
 #[derive(Clone)]
@@ -39,10 +40,12 @@ impl SandboxHandle {
             .client
             .exec(&self.node_id, &request, request_timeout)
             .await;
-        if let Err(SandboxNatsClientError::Daemon(msg)) = &result {
-            if msg.contains("sandbox not found on this node") {
-                let _ = self.client.forget_session(&self.sandbox_id).await;
-            }
+        if let Err(SandboxNatsClientError::Daemon {
+            kind: SandboxErrorKind::NotFound,
+            ..
+        }) = &result
+        {
+            let _ = self.client.forget_session(&self.sandbox_id).await;
         }
         result
     }

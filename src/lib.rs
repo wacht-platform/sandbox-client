@@ -12,7 +12,8 @@ pub use protocol::{
     AffinityRecord, CancelExecRequest, CancelExecResponse, CreateSandboxResponse,
     CreateTaskSandboxRequest, CreateThreadSandboxRequest, DeleteSandboxRequest,
     DeleteSandboxResponse, ExecOutputHandle, ExecSandboxRequest, ExecSandboxResponse,
-    ExecStreamSummary, NodeCapacity, NodeRecord, SandboxResponse, SessionRecord,
+    ExecStreamSummary, NodeCapacity, NodeRecord, SandboxErrorKind, SandboxResponse,
+    SessionRecord,
 };
 
 pub const NODES_BUCKET: &str = "sandbox_nodes";
