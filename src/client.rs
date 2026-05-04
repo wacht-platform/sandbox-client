@@ -119,13 +119,7 @@ impl SandboxNatsClient {
             let Ok(_guard) = client.live_nodes.refreshing.try_lock() else {
                 return;
             };
-            if let Err(err) = client.refresh_live_nodes_now().await {
-                tracing::warn!(
-                    target: "wacht_sandbox_client",
-                    error = %err,
-                    "live_nodes: background refresh failed",
-                );
-            }
+            let _ = client.refresh_live_nodes_now().await;
         });
     }
 
@@ -232,12 +226,6 @@ impl SandboxNatsClient {
         match self.try_attach(&sandbox_id).await? {
             Some(handle) => {
                 place_task.abort();
-                tracing::info!(
-                    target: "wacht_sandbox_client",
-                    sandbox_id = %sandbox_id,
-                    node_id = %handle.node_id(),
-                    "thread: attached existing session",
-                );
                 return Ok(handle);
             }
             None => {}
@@ -251,12 +239,6 @@ impl SandboxNatsClient {
                 )))
             }
         };
-        tracing::info!(
-            target: "wacht_sandbox_client",
-            sandbox_id = %sandbox_id,
-            node_id = %placed.node_id,
-            "thread: placed; creating",
-        );
         let response = self.create_thread(&placed.node_id, request).await?;
         Ok(self.handle(placed.node_id, response.sandbox_id))
     }
@@ -308,22 +290,10 @@ impl SandboxNatsClient {
         let session = match self.read_session(sandbox_id).await? {
             Some(session) => session,
             None => {
-                tracing::info!(
-                    target: "wacht_sandbox_client",
-                    sandbox_id = %sandbox_id,
-                    "try_attach: no session record",
-                );
                 return Ok(None);
             }
         };
         let alive = self.is_node_alive(&session.node_id).await?;
-        tracing::info!(
-            target: "wacht_sandbox_client",
-            sandbox_id = %sandbox_id,
-            node_id = %session.node_id,
-            alive,
-            "try_attach: session validation",
-        );
         if !alive {
             return Ok(None);
         }
@@ -379,7 +349,6 @@ impl SandboxNatsClient {
         &self,
         affinity_key: Option<&str>,
     ) -> Result<PlacedNode, SandboxNatsClientError> {
-        let pick_t = std::time::Instant::now();
         let affinity_fut = async {
             match affinity_key {
                 Some(key) => {
@@ -394,12 +363,6 @@ impl SandboxNatsClient {
         let (live_nodes, affinity_record) =
             tokio::try_join!(self.live_nodes_swr(), affinity_fut)?;
         let result = placement::pick_from_live_nodes(live_nodes, affinity_record)?;
-        tracing::info!(
-            target: "wacht_sandbox_client",
-            pick_ms = pick_t.elapsed().as_millis() as u64,
-            node_id = %result.node_id,
-            "place: picked",
-        );
         Ok(result)
     }
 
@@ -410,16 +373,10 @@ impl SandboxNatsClient {
         const ATTEMPTS: u32 = 6;
         let mut delay = std::time::Duration::from_millis(500);
         let mut last_err: Option<SandboxNatsClientError> = None;
-        for attempt in 0..ATTEMPTS {
+        for _ in 0..ATTEMPTS {
             match self.place(affinity_key).await {
                 Ok(node) => return Ok(node),
                 Err(SandboxNatsClientError::Placement(PlacementError::NoNodes)) => {
-                    tracing::warn!(
-                        target: "wacht_sandbox_client",
-                        attempt = attempt + 1,
-                        delay_ms = delay.as_millis() as u64,
-                        "place: no live nodes — backing off",
-                    );
                     last_err = Some(SandboxNatsClientError::Placement(PlacementError::NoNodes));
                     tokio::time::sleep(delay).await;
                     delay = (delay * 2).min(std::time::Duration::from_secs(4));
@@ -621,45 +578,13 @@ impl SandboxNatsClient {
     {
         let payload = serde_json::to_vec(body)
             .map_err(|err| SandboxNatsClientError::Decode(format!("encode request: {err}")))?;
-        let started = std::time::Instant::now();
-        tracing::info!(
-            target: "wacht_sandbox_client",
-            subject = %subject,
-            timeout_ms = timeout.as_millis() as u64,
-            payload_bytes = payload.len(),
-            "nats request start",
-        );
         let response = tokio::time::timeout(
             timeout,
             self.nats.request(subject.to_string(), payload.into()),
         )
         .await
-        .map_err(|_| {
-            tracing::warn!(
-                target: "wacht_sandbox_client",
-                subject = %subject,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                "nats request timed out",
-            );
-            SandboxNatsClientError::Nats(format!("timed out waiting for {subject}"))
-        })?
-        .map_err(|err| {
-            tracing::warn!(
-                target: "wacht_sandbox_client",
-                subject = %subject,
-                elapsed_ms = started.elapsed().as_millis() as u64,
-                error = %err,
-                "nats request errored",
-            );
-            SandboxNatsClientError::Nats(err.to_string())
-        })?;
-        tracing::info!(
-            target: "wacht_sandbox_client",
-            subject = %subject,
-            elapsed_ms = started.elapsed().as_millis() as u64,
-            response_bytes = response.payload.len(),
-            "nats request returned",
-        );
+        .map_err(|_| SandboxNatsClientError::Nats(format!("timed out waiting for {subject}")))?
+        .map_err(|err| SandboxNatsClientError::Nats(err.to_string()))?;
 
         let envelope: SandboxResponse<Res> = serde_json::from_slice(&response.payload)
             .map_err(|err| SandboxNatsClientError::Decode(err.to_string()))?;
