@@ -83,7 +83,8 @@ struct CachedLiveNodes {
 
 impl SandboxNatsClient {
     pub fn new(nats: async_nats::Client) -> Self {
-        let jetstream = jetstream::new(nats.clone());
+        let mut jetstream = jetstream::new(nats.clone());
+        jetstream.set_timeout(Duration::from_secs(30));
         Self {
             nats,
             jetstream,
