@@ -16,6 +16,15 @@ pub struct CreateTaskSandboxRequest {
     pub deployment_id: String,
     pub project_id: String,
     pub task_key: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mounts: Vec<SandboxMountSpec>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SandboxMountSpec {
+    pub mount_path: String,
+    pub s3_relative_key: String,
+    pub mode: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
