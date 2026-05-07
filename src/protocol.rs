@@ -42,6 +42,19 @@ pub struct ExecSandboxRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcileSkillsSandboxRequest {
+    pub sandbox_id: String,
+    pub agent_id: String,
+    pub slugs: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ReconcileSkillsSandboxResponse {
+    pub sandbox_id: String,
+    pub mounted: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CancelExecRequest {
     pub sandbox_id: String,
     pub exec_id: String,

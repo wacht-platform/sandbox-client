@@ -3,7 +3,7 @@ use std::time::Duration;
 use crate::client::{SandboxNatsClient, SandboxNatsClientError};
 use crate::protocol::{
     CancelExecRequest, DeleteSandboxResponse, ExecSandboxRequest, ExecSandboxResponse,
-    SandboxErrorKind,
+    ReconcileSkillsSandboxRequest, ReconcileSkillsSandboxResponse, SandboxErrorKind,
 };
 
 #[derive(Clone)]
@@ -80,6 +80,23 @@ impl SandboxHandle {
             .fs_write(&self.node_id, &self.sandbox_id, path, content)
             .await?;
         Ok(())
+    }
+
+    pub async fn reconcile_skills(
+        &self,
+        agent_id: &str,
+        slugs: Vec<String>,
+    ) -> Result<ReconcileSkillsSandboxResponse, SandboxNatsClientError> {
+        self.client
+            .reconcile_skills(
+                &self.node_id,
+                &ReconcileSkillsSandboxRequest {
+                    sandbox_id: self.sandbox_id.clone(),
+                    agent_id: agent_id.to_string(),
+                    slugs,
+                },
+            )
+            .await
     }
 
     pub async fn delete(&self) -> Result<DeleteSandboxResponse, SandboxNatsClientError> {

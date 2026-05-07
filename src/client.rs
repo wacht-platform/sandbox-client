@@ -439,6 +439,15 @@ impl SandboxNatsClient {
         self.request(&subjects::delete(node_id), request).await
     }
 
+    pub(crate) async fn reconcile_skills(
+        &self,
+        node_id: &str,
+        request: &crate::protocol::ReconcileSkillsSandboxRequest,
+    ) -> Result<crate::protocol::ReconcileSkillsSandboxResponse, SandboxNatsClientError> {
+        self.request(&subjects::reconcile_skills(node_id), request)
+            .await
+    }
+
     pub(crate) async fn fs_read(
         &self,
         node_id: &str,

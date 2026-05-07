@@ -25,3 +25,7 @@ pub fn fs_read(node_id: &str) -> String {
 pub fn fs_write(node_id: &str) -> String {
     format!("sandbox.node.{node_id}.fs.write")
 }
+
+pub fn reconcile_skills(node_id: &str) -> String {
+    format!("sandbox.node.{node_id}.skills.reconcile")
+}
