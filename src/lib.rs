@@ -2,9 +2,9 @@ pub mod affinity;
 pub mod client;
 pub mod handle;
 pub mod protocol;
+pub mod subjects;
 
 pub(crate) mod placement;
-pub(crate) mod subjects;
 
 pub use client::{SandboxNatsClient, SandboxNatsClientError};
 pub use handle::SandboxHandle;

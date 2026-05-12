@@ -250,3 +250,13 @@ pub struct SessionRecord {
     pub status: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FsInvalidationMessage {
+    pub origin_sandbox_id: String,
+    pub origin_node_id: String,
+    pub deployment_id: String,
+    pub project_id: String,
+    pub ts_unix_ms: u64,
+    pub dirty_dirs: Vec<String>,
+}
+
