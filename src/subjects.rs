@@ -29,9 +29,3 @@ pub fn fs_write(node_id: &str) -> String {
 pub fn reconcile_skills(node_id: &str) -> String {
     format!("sandbox.node.{node_id}.skills.reconcile")
 }
-
-pub fn fs_invalidate(deployment_id: &str, project_id: &str) -> String {
-    format!("fs.invalidate.{deployment_id}.{project_id}")
-}
-
-pub const FS_INVALIDATE_WILDCARD: &str = "fs.invalidate.*.*";
