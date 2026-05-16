@@ -448,6 +448,14 @@ impl SandboxNatsClient {
             .await
     }
 
+    pub(crate) async fn touch(
+        &self,
+        node_id: &str,
+        request: &crate::protocol::TouchSandboxRequest,
+    ) -> Result<crate::protocol::TouchSandboxResponse, SandboxNatsClientError> {
+        self.request(&subjects::touch(node_id), request).await
+    }
+
     pub(crate) async fn fs_read(
         &self,
         node_id: &str,

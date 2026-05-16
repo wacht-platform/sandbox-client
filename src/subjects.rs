@@ -29,3 +29,7 @@ pub fn fs_write(node_id: &str) -> String {
 pub fn reconcile_skills(node_id: &str) -> String {
     format!("sandbox.node.{node_id}.skills.reconcile")
 }
+
+pub fn touch(node_id: &str) -> String {
+    format!("sandbox.node.{node_id}.touch")
+}

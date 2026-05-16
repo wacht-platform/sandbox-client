@@ -66,6 +66,17 @@ pub struct DeleteSandboxRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TouchSandboxRequest {
+    pub sandbox_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TouchSandboxResponse {
+    pub sandbox_id: String,
+    pub last_activity_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FsBlobHandle {
     pub bucket: String,
     pub key: String,

@@ -110,6 +110,22 @@ impl SandboxHandle {
             .await
     }
 
+    /// Keepalive — resets the sandbox's idle timer on the node without doing
+    /// any work. Cheap; intended to be called periodically by the agent loop
+    /// while waiting on LLM responses or other long-running external operations.
+    pub async fn touch(
+        &self,
+    ) -> Result<crate::protocol::TouchSandboxResponse, SandboxNatsClientError> {
+        self.client
+            .touch(
+                &self.node_id,
+                &crate::protocol::TouchSandboxRequest {
+                    sandbox_id: self.sandbox_id.clone(),
+                },
+            )
+            .await
+    }
+
     pub async fn read_exec_output(
         &self,
         response: &ExecSandboxResponse,

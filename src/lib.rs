@@ -14,7 +14,7 @@ pub use protocol::{
     DeleteSandboxResponse, ExecOutputHandle, ExecSandboxRequest, ExecSandboxResponse,
     ExecStreamSummary, NodeCapacity, NodeRecord, ReconcileSkillsSandboxRequest,
     ReconcileSkillsSandboxResponse, SandboxErrorKind, SandboxMountSpec, SandboxResponse,
-    SessionRecord,
+    SessionRecord, TouchSandboxRequest, TouchSandboxResponse,
 };
 
 pub const NODES_BUCKET: &str = "sandbox_nodes";
